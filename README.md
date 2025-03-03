@@ -49,6 +49,9 @@ python testing.py
 - Размер изображений: 512x512
 - Метрика оценки: IoU (Intersection over Union)
 
+## Батч 8:
+Среднее значение IoU: 0.1726
+
 ## Требования
 
 - Python 3.6+
