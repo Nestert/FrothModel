@@ -53,8 +53,13 @@ python testing.py
 - Размер изображений: 512x512
 - Метрика оценки: IoU (Intersection over Union)
 
-## Батч 8:
-Среднее значение IoU: 0.1726
+## Result:
+Epoch 47/50
+----------
+train Loss: 0.1245 | train IoU: 0.7431
+val Loss: 0.1255 | val IoU: 0.7497
+
+Test : IoU: 0.1708
 
 ## Требования
 
