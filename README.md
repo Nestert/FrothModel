@@ -59,7 +59,7 @@ Epoch 47/50
 train Loss: 0.1245 | train IoU: 0.7431
 val Loss: 0.1255 | val IoU: 0.7497
 
-Test : IoU: 0.1708
+Test IoU: 0.6947
 
 ## Требования
 
