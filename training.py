@@ -22,10 +22,14 @@ VAL_IMAGES_DIR = os.path.join(DATA_DIR, 'valid/valid_images')
 VAL_MASKS_DIR = os.path.join(DATA_DIR, 'valid/valid_masks')
 
 # Размер батча, количество эпох, начальный learning rate
-BATCH_SIZE = 4
+BATCH_SIZE = 8  # Увеличиваем размер батча, так как MobileNetV3 легче
 NUM_EPOCHS = 50
 LR = 1e-3
 IMAGE_SIZE = (512, 512)  # Размер, к которому приводим все изображения
+
+# Параметры MobileNetV3
+MOBILENETV3_SIZE = 'large'  # 'large' или 'small'
+MOBILENETV3_WEIGHTS = 'imagenet'
 
 # --------------------------------------------------
 # 2. ДАТАСЕТ
@@ -87,6 +91,23 @@ def get_transforms(phase='train'):
             A.RandomRotate90(p=0.5),
             # Дополнительные цветовые аугментации
             A.ColorJitter(p=0.2, brightness=0.2, contrast=0.2, saturation=0.2, hue=0.2),
+            # Добавляем новые аугментации
+            A.OneOf([
+                A.GaussNoise(p=1),
+                A.GaussianBlur(p=1),
+                A.MotionBlur(p=1),
+                A.MedianBlur(p=1)
+            ], p=0.2),
+            A.OneOf([
+                A.ElasticTransform(alpha=120, sigma=120 * 0.05, alpha_affine=120 * 0.03, p=1),
+                A.GridDistortion(p=1),
+                A.OpticalDistortion(distort_limit=1, shift_limit=0.5, p=1)
+            ], p=0.2),
+            A.OneOf([
+                A.RandomBrightnessContrast(p=1),
+                A.RandomGamma(p=1),
+                A.HueSaturationValue(p=1)
+            ], p=0.2),
             # Нормализация под ImageNet
             A.Normalize(mean=(0.485, 0.456, 0.406),
                         std=(0.229, 0.224, 0.225)),
@@ -154,6 +175,18 @@ def iou_score(outputs, targets, threshold=0.5):
 # --------------------------------------------------
 def train_model(model, dataloaders, criterion, optimizer, num_epochs, device):
     best_iou = 0.0
+    patience = 10  # Количество эпох для early stopping
+    patience_counter = 0
+    
+    # Добавляем learning rate scheduler
+    scheduler = optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=LR,
+        epochs=num_epochs,
+        steps_per_epoch=len(dataloaders['train']),
+        pct_start=0.3
+    )
+    
     for epoch in range(num_epochs):
         print(f"\nEpoch {epoch+1}/{num_epochs}")
         print("-" * 10)
@@ -185,7 +218,10 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs, device):
 
                     if phase == 'train':
                         loss.backward()
+                        # Добавляем gradient clipping
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                         optimizer.step()
+                        scheduler.step()
 
             epoch_loss = running_loss / num_samples
             epoch_iou = running_iou / num_samples
@@ -193,10 +229,17 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs, device):
             print(f"{phase} Loss: {epoch_loss:.4f} | {phase} IoU: {epoch_iou:.4f}")
 
             # Сохраняем лучшую модель по метрике IoU на валидации
-            if phase == 'val' and epoch_iou > best_iou:
-                best_iou = epoch_iou
-                torch.save(model.state_dict(), "best_model.pth")
-                print("Model saved (best IoU so far).")
+            if phase == 'val':
+                if epoch_iou > best_iou:
+                    best_iou = epoch_iou
+                    torch.save(model.state_dict(), "best_model.pth")
+                    print("Model saved (best IoU so far).")
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                    if patience_counter >= patience:
+                        print(f"Early stopping triggered after {epoch + 1} epochs")
+                        return model
 
     print("\nTraining complete.")
     print(f"Best validation IoU: {best_iou:.4f}")
@@ -205,6 +248,23 @@ def train_model(model, dataloaders, criterion, optimizer, num_epochs, device):
 # --------------------------------------------------
 # 7. ИНФЕРЕНС (ПРОГНОЗ)
 # --------------------------------------------------
+def optimize_model(model, device):
+    """
+    Оптимизирует модель с помощью TorchScript для ускорения инференса.
+    """
+    model.eval()
+    # Создаем пример входных данных
+    dummy_input = torch.randn(1, 3, IMAGE_SIZE[0], IMAGE_SIZE[1]).to(device)
+    
+    # Трейсируем модель
+    traced_model = torch.jit.trace(model, dummy_input)
+    
+    # Сохраняем оптимизированную модель
+    torch.jit.save(traced_model, "optimized_model.pt")
+    print("Model optimized and saved as 'optimized_model.pt'")
+    
+    return traced_model
+
 def predict_image(model, image_path, device, transform=None, threshold=0.5):
     """
     Функция для прогноза маски на одном изображении.
@@ -223,12 +283,45 @@ def predict_image(model, image_path, device, transform=None, threshold=0.5):
         input_tensor = input_tensor.unsqueeze(0).to(device)
 
     with torch.no_grad():
-        output = model(input_tensor)
+        # Используем TorchScript модель, если она доступна
+        if isinstance(model, torch.jit.ScriptModule):
+            output = model(input_tensor)
+        else:
+            output = model(input_tensor)
         output = torch.sigmoid(output)
         pred_mask = (output > threshold).float()
     # Приведём маску к numpy
     pred_mask = pred_mask.squeeze().cpu().numpy()  # shape: [H, W]
     return pred_mask
+
+def convert_to_onnx(model, device):
+    """
+    Конвертирует PyTorch модель в формат ONNX для оптимизации инференса.
+    """
+    model.eval()
+    # Создаем пример входных данных
+    dummy_input = torch.randn(1, 3, IMAGE_SIZE[0], IMAGE_SIZE[1]).to(device)
+    
+    # Определяем путь для сохранения ONNX модели
+    onnx_path = "model.onnx"
+    
+    # Экспортируем модель в ONNX
+    torch.onnx.export(
+        model,                     # PyTorch модель
+        dummy_input,              # Пример входных данных
+        onnx_path,                # Путь для сохранения
+        export_params=True,       # Сохраняем веса модели
+        opset_version=11,         # Версия ONNX операторов
+        do_constant_folding=True, # Оптимизация констант
+        input_names=['input'],    # Имя входного тензора
+        output_names=['output'],  # Имя выходного тензора
+        dynamic_axes={            # Динамические размеры для батча
+            'input': {0: 'batch_size'},
+            'output': {0: 'batch_size'}
+        }
+    )
+    print(f"Model converted and saved as '{onnx_path}'")
+    return onnx_path
 
 # --------------------------------------------------
 # 8. MAIN
@@ -247,26 +340,34 @@ def main():
         'val': DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
     }
 
-    # Определяем модель (Unet + ResNet34)
+    # Определяем модель (Unet + MobileNetV3)
     model = smp.Unet(
-        encoder_name="resnet34",
-        encoder_weights="imagenet",
+        encoder_name=f"mobilenetv3_{MOBILENETV3_SIZE}",
+        encoder_weights=MOBILENETV3_WEIGHTS,
         in_channels=3,
         classes=1,
         activation=None  # будем использовать сигмоиду внутри кода
-    ).to(device)
+    )
+    model = model.to(device)
 
-    # Функция потерь (комбинированная BCE + Dice)
-    criterion = BCEDiceLoss(bce_weight=0.5)
-
-    # Оптимизатор
-    optimizer = optim.Adam(model.parameters(), lr=LR)
+    # Определяем функцию потерь и оптимизатор
+    criterion = BCEDiceLoss()
+    optimizer = optim.AdamW(  # Используем AdamW вместо Adam для лучшей регуляризации
+        model.parameters(),
+        lr=LR,
+        weight_decay=1e-4  # Добавляем L2 регуляризацию
+    )
 
     # Обучаем модель
     model = train_model(model, dataloaders, criterion, optimizer, NUM_EPOCHS, device)
+    
+    # Оптимизируем модель с помощью TorchScript
+    optimized_model = optimize_model(model, device)
+    
+    # Конвертируем модель в ONNX формат
+    onnx_path = convert_to_onnx(model, device)
 
     # Пример инференса на одном изображении
-    # (путь к любому изображению, где нужно спрогнозировать маску)
     test_image_path = "test_image.jpg"
     if os.path.exists(test_image_path):
         pred_mask = predict_image(model, test_image_path, device, transform=get_transforms('val'))
