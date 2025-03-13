@@ -9,6 +9,12 @@ import segmentation_models_pytorch as smp
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
+# Константы (должны соответствовать training.py)
+IMAGE_SIZE = (512, 512)
+# Параметры MobileNetV3
+MOBILENETV3_SIZE = 'large'
+MOBILENETV3_WEIGHTS = 'imagenet'
+
 # Функция для вычисления метрики IoU
 def iou_score(pred: np.ndarray, mask: np.ndarray, threshold: float = 0.5) -> float:
     """
@@ -92,7 +98,6 @@ class BubbleDataset(Dataset):
 
 # Трансформации для тестовых данных (должны соответствовать тем, что использовались при обучении)
 def get_transforms():
-    IMAGE_SIZE = (512, 512)  # Такой же размер, как и при обучении
     return A.Compose([
         A.LongestMaxSize(max_size=max(IMAGE_SIZE)),
         A.PadIfNeeded(min_height=IMAGE_SIZE[0], min_width=IMAGE_SIZE[1],
@@ -173,13 +178,13 @@ def main():
     test_loader = DataLoader(test_dataset, batch_size=4, shuffle=False, num_workers=4)
     print(f"Создан DataLoader с {len(test_dataset)} тестовыми примерами")
     
-    # Создаем модель U-Net
+    # Создаем модель U-Net c MobileNetV3 в качестве энкодера (как в training.py)
     model = smp.Unet(
-        encoder_name="resnet34",
-        encoder_weights=None,
+        encoder_name=f"timm-mobilenetv3_{MOBILENETV3_SIZE}_100",
+        encoder_weights=None,  # Веса будут загружены из сохраненной модели
         in_channels=3,
         classes=1,
-        activation=None
+        activation=None  # Будем использовать сигмоиду внутри кода
     )
     
     # Загружаем сохраненные веса обученной модели
@@ -194,6 +199,19 @@ def main():
         print(f"Итоговый Test IoU: {test_iou:.4f}")
     else:
         print(f"ОШИБКА: Файл модели {model_path} не найден!")
+        
+        # Попробуем загрузить оптимизированную модель, если обычная не найдена
+    optimized_model_path = "optimized_model.pt"
+    if os.path.exists(optimized_model_path):
+        print(f"Загрузка оптимизированной модели из {optimized_model_path}")
+        model = torch.jit.load(optimized_model_path)
+        model.to(device)
+        
+        # Оценка модели на тестовом наборе по метрике IoU
+        test_iou = evaluate_model(model, test_loader, device)
+        print(f"Итоговый Test IoU: {test_iou:.4f}")
+    else:
+        print(f"ОШИБКА: Файл оптимизированной модели {optimized_model_path} также не найден!")
 
 if __name__ == '__main__':
     main()

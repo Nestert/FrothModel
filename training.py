@@ -85,7 +85,7 @@ def get_transforms(phase='train'):
             A.LongestMaxSize(max_size=max(IMAGE_SIZE)),
             # Дополнение паддингом до нужного размера
             A.PadIfNeeded(min_height=IMAGE_SIZE[0], min_width=IMAGE_SIZE[1],
-                          border_mode=0, value=(0, 0, 0)),
+                          border_mode=0),
             A.HorizontalFlip(p=0.5),
             A.VerticalFlip(p=0.5),
             A.RandomRotate90(p=0.5),
@@ -99,9 +99,9 @@ def get_transforms(phase='train'):
                 A.MedianBlur(p=1)
             ], p=0.2),
             A.OneOf([
-                A.ElasticTransform(alpha=120, sigma=120 * 0.05, alpha_affine=120 * 0.03, p=1),
+                A.ElasticTransform(alpha=120, sigma=120 * 0.05, p=1),
                 A.GridDistortion(p=1),
-                A.OpticalDistortion(distort_limit=1, shift_limit=0.5, p=1)
+                A.OpticalDistortion(distort_limit=1, p=1)
             ], p=0.2),
             A.OneOf([
                 A.RandomBrightnessContrast(p=1),
@@ -117,7 +117,7 @@ def get_transforms(phase='train'):
         return A.Compose([
             A.LongestMaxSize(max_size=max(IMAGE_SIZE)),
             A.PadIfNeeded(min_height=IMAGE_SIZE[0], min_width=IMAGE_SIZE[1],
-                          border_mode=0, value=(0, 0, 0)),
+                          border_mode=0),
             A.Normalize(mean=(0.485, 0.456, 0.406),
                         std=(0.229, 0.224, 0.225)),
             ToTensorV2()
@@ -342,7 +342,7 @@ def main():
 
     # Определяем модель (Unet + MobileNetV3)
     model = smp.Unet(
-        encoder_name=f"mobilenetv3_{MOBILENETV3_SIZE}",
+        encoder_name=f"timm-mobilenetv3_{MOBILENETV3_SIZE}_100",
         encoder_weights=MOBILENETV3_WEIGHTS,
         in_channels=3,
         classes=1,
