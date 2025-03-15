@@ -11,9 +11,11 @@ from albumentations.pytorch import ToTensorV2
 
 # Константы (должны соответствовать training.py)
 IMAGE_SIZE = (512, 512)
+MODELS_DIR = 'models'  # Папка с сохраненными моделями
 # Параметры MobileNetV3
-MOBILENETV3_SIZE = 'large'
-MOBILENETV3_WEIGHTS = 'imagenet'
+TEACHER_BACKBONE = "timm-mobilenetv3_large_100"
+STUDENT_BACKBONE = "timm-mobilenetv3_small_100"
+ENCODER_WEIGHTS = "imagenet"
 
 # Функция для вычисления метрики IoU
 def iou_score(pred: np.ndarray, mask: np.ndarray, threshold: float = 0.5) -> float:
@@ -108,11 +110,12 @@ def get_transforms():
     ], p=1.0)
 
 # Функция для оценки модели на тестовом наборе с вычислением IoU
-def evaluate_model(model, dataloader, device):
+def evaluate_model(model, dataloader, device, model_name=""):
     model.eval()
     total_iou = 0.0
     count = 0
     batch_count = 0
+    print(f"\nОценка модели: {model_name}")
     with torch.no_grad():
         for images, masks in dataloader:
             batch_count += 1
@@ -151,8 +154,41 @@ def evaluate_model(model, dataloader, device):
                           f"сумма маски: {masks_np[i, 0].sum()}")
     
     average_iou = total_iou / count if count > 0 else 0
-    print(f"Среднее значение IoU: {average_iou:.4f}")
+    print(f"Среднее значение IoU для {model_name}: {average_iou:.4f}")
     return average_iou
+
+def load_and_evaluate_model(model_path, test_loader, device, is_teacher=True, is_traced=False):
+    """
+    Загружает и оценивает модель из указанного пути.
+    
+    :param model_path: Путь к файлу модели
+    :param test_loader: DataLoader с тестовыми данными
+    :param device: Устройство для вычислений
+    :param is_teacher: Флаг, указывающий является ли модель teacher моделью
+    :param is_traced: Флаг, указывающий является ли модель TorchScript моделью
+    :return: Значение IoU
+    """
+    try:
+        if is_traced:
+            model = torch.jit.load(model_path)
+        else:
+            # Создаем соответствующую архитектуру модели
+            backbone = TEACHER_BACKBONE if is_teacher else STUDENT_BACKBONE
+            model = smp.Unet(
+                encoder_name=backbone,
+                encoder_weights=None,
+                in_channels=3,
+                classes=1,
+                activation=None
+            )
+            model.load_state_dict(torch.load(model_path, map_location=device))
+        
+        model.to(device)
+        model_name = os.path.basename(model_path)
+        return evaluate_model(model, test_loader, device, model_name)
+    except Exception as e:
+        print(f"Ошибка при загрузке/оценке модели {model_path}: {str(e)}")
+        return None
 
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -178,40 +214,51 @@ def main():
     test_loader = DataLoader(test_dataset, batch_size=4, shuffle=False, num_workers=4)
     print(f"Создан DataLoader с {len(test_dataset)} тестовыми примерами")
     
-    # Создаем модель U-Net c MobileNetV3 в качестве энкодера (как в training.py)
-    model = smp.Unet(
-        encoder_name=f"timm-mobilenetv3_{MOBILENETV3_SIZE}_100",
-        encoder_weights=None,  # Веса будут загружены из сохраненной модели
-        in_channels=3,
-        classes=1,
-        activation=None  # Будем использовать сигмоиду внутри кода
-    )
+    # Словарь для хранения результатов
+    results = {}
     
-    # Загружаем сохраненные веса обученной модели
-    model_path = "best_model.pth"
-    if os.path.exists(model_path):
-        print(f"Загрузка весов модели из {model_path}")
-        model.load_state_dict(torch.load(model_path, map_location=device))
-        model.to(device)
+    # Проверяем наличие папки с моделями
+    if not os.path.exists(MODELS_DIR):
+        print(f"ОШИБКА: Папка {MODELS_DIR} не найдена!")
+        return
         
-        # Оценка модели на тестовом наборе по метрике IoU
-        test_iou = evaluate_model(model, test_loader, device)
-        print(f"Итоговый Test IoU: {test_iou:.4f}")
-    else:
-        print(f"ОШИБКА: Файл модели {model_path} не найден!")
-        
-        # Попробуем загрузить оптимизированную модель, если обычная не найдена
-    optimized_model_path = "optimized_model.pt"
+    # Оцениваем все модели в папке models
+    print("\nНачинаем оценку всех моделей...")
+    
+    # Teacher модели
+    teacher_model_path = os.path.join(MODELS_DIR, "teacher_model.pth")
+    if os.path.exists(teacher_model_path):
+        results['teacher'] = load_and_evaluate_model(teacher_model_path, test_loader, device, is_teacher=True)
+    
+    # Прунированная teacher модель
+    pruned_model_path = os.path.join(MODELS_DIR, "teacher_model_pruned.pth")
+    if os.path.exists(pruned_model_path):
+        results['teacher_pruned'] = load_and_evaluate_model(pruned_model_path, test_loader, device, is_teacher=True)
+    
+    # Квантованная teacher модель
+    quantized_model_path = os.path.join(MODELS_DIR, "teacher_model_quantized.pth")
+    if os.path.exists(quantized_model_path):
+        results['teacher_quantized'] = load_and_evaluate_model(quantized_model_path, test_loader, device, is_teacher=True)
+    
+    # Student модель
+    student_model_path = os.path.join(MODELS_DIR, "student_model.pth")
+    if os.path.exists(student_model_path):
+        results['student'] = load_and_evaluate_model(student_model_path, test_loader, device, is_teacher=False)
+    
+    # Оптимизированная модель (TorchScript)
+    optimized_model_path = os.path.join(MODELS_DIR, "optimized_model.pt")
     if os.path.exists(optimized_model_path):
-        print(f"Загрузка оптимизированной модели из {optimized_model_path}")
-        model = torch.jit.load(optimized_model_path)
-        model.to(device)
-        
-        # Оценка модели на тестовом наборе по метрике IoU
-        test_iou = evaluate_model(model, test_loader, device)
-        print(f"Итоговый Test IoU: {test_iou:.4f}")
-    else:
-        print(f"ОШИБКА: Файл оптимизированной модели {optimized_model_path} также не найден!")
+        results['optimized'] = load_and_evaluate_model(optimized_model_path, test_loader, device, is_teacher=False, is_traced=True)
+    
+    # Выводим сравнительную таблицу результатов
+    print("\nСравнительные результаты:")
+    print("-" * 50)
+    print(f"{'Модель':<20} | {'IoU':<10}")
+    print("-" * 50)
+    for model_name, iou in results.items():
+        if iou is not None:
+            print(f"{model_name:<20} | {iou:.4f}")
+    print("-" * 50)
 
 if __name__ == '__main__':
     main()
