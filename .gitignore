@@ -1,3 +1,9 @@
 /DataSet
 .DS_Store
 yolo_data/data.yaml
+__pycache__/
+
+
+yolo_data/
+yolo_runs/
+yolo11n.pt

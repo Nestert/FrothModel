@@ -18,10 +18,10 @@ VAL_IMAGES_DIR = os.path.join(DATA_DIR, 'valid/valid_images')
 VAL_MASKS_DIR = os.path.join(DATA_DIR, 'valid/valid_masks')
 
 # Параметры обучения
-BATCH_SIZE = 16  # YOLO хорошо работает с большими батчами
-NUM_EPOCHS = 50
+BATCH_SIZE = 4  # Уменьшаем размер батча
+NUM_EPOCHS = 10  # Уменьшаем количество эпох
 IMAGE_SIZE = 640  # YOLO обычно использует размер 640
-YOLO_MODEL = 'yolov11n-seg.pt'  # Опции: yolov8n-seg.pt, yolov8s-seg.pt, yolov8m-seg.pt, yolov8l-seg.pt, yolov8x-seg.pt
+YOLO_MODEL = 'yolo11n-seg.pt'  # Используем локальную модель
 
 # Директория для YOLO данных
 YOLO_DIR = 'yolo_data'
@@ -84,6 +84,13 @@ def convert_dataset_to_yolo_format():
     """
     Конвертирует датасет из исходного формата в формат YOLO.
     """
+    # Проверяем, существуют ли уже подготовленные данные
+    if os.path.exists(os.path.join(YOLO_DIR, 'data.yaml')) and \
+       os.path.exists(os.path.join(YOLO_DIR, 'images/train')) and \
+       os.path.exists(os.path.join(YOLO_DIR, 'labels/train')):
+        print("Данные YOLO уже подготовлены. Пропускаем этап конвертации.")
+        return
+    
     create_yolo_dataset_structure()
     
     # Обрабатываем тренировочные данные
@@ -154,30 +161,39 @@ def train_yolo_model():
     """
     Обучает YOLOv8-seg на подготовленном датасете.
     """
-    # Загружаем предобученную модель
-    model = YOLO(YOLO_MODEL)
-    
-    # Запускаем обучение
-    results = model.train(
-        data=os.path.join(YOLO_DIR, 'data.yaml'),
-        epochs=NUM_EPOCHS,
-        imgsz=IMAGE_SIZE,
-        batch=BATCH_SIZE,
-        patience=10,  # Early stopping
-        device='0' if torch.cuda.is_available() else 'cpu',
-        project='yolo_runs',
-        name='bubbles_segmentation',
-        pretrained=True,
-        optimizer='AdamW',  # Тот же оптимизатор, что и в исходном коде
-        lr0=1e-3,
-        lrf=0.01,
-        weight_decay=1e-4,  # L2 регуляризация как в исходном коде
-        save=True,
-        save_period=5,  # Сохранять каждые 5 эпох
-        exist_ok=True
-    )
-    
-    return results
+    try:
+        print(f"Загружаем модель {YOLO_MODEL}...")
+        # Загружаем предобученную модель
+        model = YOLO(YOLO_MODEL)
+        
+        print("Модель успешно загружена, начинаем обучение...")
+        # Запускаем обучение
+        results = model.train(
+            data=os.path.join(YOLO_DIR, 'data.yaml'),
+            epochs=NUM_EPOCHS,
+            imgsz=IMAGE_SIZE,
+            batch=BATCH_SIZE,
+            patience=10,  # Early stopping
+            device='0' if torch.cuda.is_available() else 'cpu',
+            project='yolo_runs',
+            name='bubbles_segmentation',
+            pretrained=True,
+            optimizer='AdamW',  # Тот же оптимизатор, что и в исходном коде
+            lr0=1e-3,
+            lrf=0.01,
+            weight_decay=1e-4,  # L2 регуляризация как в исходном коде
+            save=True,
+            save_period=5,  # Сохранять каждые 5 эпох
+            exist_ok=True,
+            verbose=True  # Подробный вывод
+        )
+        
+        return results
+    except Exception as e:
+        print(f"Ошибка при обучении: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 # --------------------------------------------------
 # 4. ИНФЕРЕНС (ПРОГНОЗ)
@@ -216,33 +232,39 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Используем устройство: {device}")
     
-    # Конвертируем датасет в формат YOLO
-    print("Конвертируем датасет в формат YOLO...")
-    convert_dataset_to_yolo_format()
-    
-    # Обучаем модель
-    print("Запускаем обучение...")
-    results = train_yolo_model()
-    
-    # Загружаем лучшую модель
-    best_model_path = os.path.join('yolo_runs/bubbles_segmentation/weights', 'best.pt')
-    if os.path.exists(best_model_path):
-        best_model = YOLO(best_model_path)
+    try:
+        # Конвертируем датасет в формат YOLO
+        print("Конвертируем датасет в формат YOLO...")
+        convert_dataset_to_yolo_format()
         
-        # Экспортируем модель в ONNX
-        print("Экспортируем модель в ONNX...")
-        exported_model = export_model(best_model, format='onnx')
+        # Обучаем модель
+        print("Запускаем обучение...")
+        results = train_yolo_model()
         
-        # Пример инференса на тестовом изображении
-        test_image_path = "test_image.jpg"
-        if os.path.exists(test_image_path):
-            print("Запускаем инференс на тестовом изображении...")
-            results = predict_image(best_model, test_image_path)
-            print(f"Результаты инференса сохранены в директории: {results[0].save_dir}")
-        else:
-            print("test_image.jpg не найден, пропускаем инференс.")
-    else:
-        print("Не удалось найти лучшую модель.")
+        if results is not None:
+            # Загружаем лучшую модель
+            best_model_path = os.path.join('yolo_runs/bubbles_segmentation/weights', 'best.pt')
+            if os.path.exists(best_model_path):
+                best_model = YOLO(best_model_path)
+                
+                # Экспортируем модель в ONNX
+                print("Экспортируем модель в ONNX...")
+                exported_model = export_model(best_model, format='onnx')
+                
+                # Пример инференса на тестовом изображении
+                test_image_path = "test_image.jpg"
+                if os.path.exists(test_image_path):
+                    print("Запускаем инференс на тестовом изображении...")
+                    results = predict_image(best_model, test_image_path)
+                    print(f"Результаты инференса сохранены в директории: {results[0].save_dir}")
+                else:
+                    print("test_image.jpg не найден, пропускаем инференс.")
+            else:
+                print("Не удалось найти лучшую модель.")
+    except Exception as e:
+        print(f"Произошла ошибка: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == '__main__':
     main() 
